@@ -61,9 +61,10 @@ func Sha3(data []byte) []byte {
 type Node struct {
 	value []byte
 	child []*Node
-	parent []*Node //not in use yet, but will be used for producing proofs
+	parent []*Node
 }
 
+//This makes unconnected nodes with .value fields as the slices of the data
 func make_orphan_nodes (data_chunks [][]byte) []*Node {
 	num_chunks := len(data_chunks)
         orphans := make([]*Node, num_chunks)
@@ -80,7 +81,12 @@ func make_orphan_nodes (data_chunks [][]byte) []*Node {
       / \
      O
     / \
+
+
+The convention will be to append to bigger hash to a smaller hash
+	H(H1 + H2) if H1 < H2 
 */
+
 
 func merkle_tree(orphans_copy []*Node) *Node {
         num_orphans := len(orphans_copy)
@@ -147,10 +153,8 @@ func report_decendants(parent *Node, call_num *int) {
 		fmt.Println(Bytes2Hex((*(*parent).child[i]).value))
 		*call_num += 1
 		report_decendants((*parent).child[i], call_num)
-
 	}
 }
-
 
 
 func Signature(hash []byte, key []byte) []byte {
@@ -182,7 +186,6 @@ func find_sibling (brother *Node) *Node{
 
 func produce_merkle_proof(leaves []*Node, challenge int) [][]byte {
 	proof := new([][]byte)
-
 	current_node := leaves[challenge]
 	*proof = append(*proof, (*current_node).value)
 	for len((*current_node).parent) > 0 {
@@ -194,7 +197,7 @@ func produce_merkle_proof(leaves []*Node, challenge int) [][]byte {
 }
 
 
-func check_merkle_proof(proof [][]byte, root Node) bool {
+func verify_merkle_proof(proof [][]byte, root Node) bool {
 	var H []byte
 	H = append(H, proof[0]...)
 	
@@ -210,25 +213,110 @@ func check_merkle_proof(proof [][]byte, root Node) bool {
 }
 
 
-//not in use, yet
-func ECRecover(hash []byte, sig []byte) ([]byte, error) {
-	pubkey, err := secp256k1.RecoverPubkey(hash, sig)
+type PoC_stage struct {
+        data []*Node
+	data_root *Node //This shouldn't really be here, but for now there is no other source of the file root
+        sigs []*Node
+	sig_root *Node
+}
+
+
+func stage_PoC(file string, key []byte) PoC_stage {
+        //this is the largest chunk size that can be signed by secp256k1.Sign
+        //bigger data chunks would have to be hashed before signed, which opens
+        //the attack vector of sharing the hashes rather than the file, to collude
+        // to produce a proof-of-custody
+	chunk_size := 32 //in bytes
+
+	var stage PoC_stage 
+
+        data := read_data(file)
+        padded_data := pad_data(data, chunk_size)
+        chunks := slice_data(padded_data, chunk_size)
+        stage.data = make_orphan_nodes(chunks)
+        stage.data_root = merkle_tree(stage.data)
+
+        sigs := sign_chunks(chunks, key)
+        stage.sigs = make_orphan_nodes(sigs)
+        stage.sig_root = merkle_tree(stage.sigs)
+
+	return stage
+}
+
+type PoC struct {
+        data_proof [][]byte
+        sig_proof [][]byte
+}
+
+func PoC_commit (stage PoC_stage) *Node {
+	return stage.sig_root
+}
+
+
+func PoC_response (stage PoC_stage, challenge int) PoC {
+	var proof PoC
+	proof.data_proof = produce_merkle_proof(stage.data, challenge)
+	proof.sig_proof = produce_merkle_proof(stage.sigs, challenge)
+	return proof
+}
+
+
+func ECVerify(hash []byte, sig []byte) bool {
+	_, err := secp256k1.RecoverPubkey(hash, sig)
 	if err != nil {
-		return nil, err
+		return false
 	}
-	return pubkey, nil
+	return true
+}
+
+func PoC_verify(proof PoC, file_root *Node, sig_root *Node) bool {
+	var valid bool = true
+	valid = valid && verify_merkle_proof(proof.data_proof, *file_root)
+	valid = valid && verify_merkle_proof(proof.sig_proof, *sig_root)
+	if ECVerify(proof.data_proof[0], proof.sig_proof[0]) {
+		return valid
+	}
+	return false
 }
 
 func main() {
+
+	//A private key
+	key := Sha3(Hex2Bytes("hello world"))
+	fmt.Printf("Private key: \n")
+	fmt.Println(Bytes2Hex(key))
+
+	stage := stage_PoC("helloworld.txt", key)
+
+	commit := PoC_commit(stage)
+	fmt.Printf("\nCommitment of signature root: \n")
+	fmt.Println(Bytes2Hex((*commit).value))
+
+	challenge := 0
+	fmt.Printf("\nChallenge: \n%d\n", challenge)
+
+	response := PoC_response(stage, challenge)	
+	fmt.Printf("\nMerkle proof for data: \n")
+	for i := 0; i < len(response.data_proof); i++ {
+		fmt.Println(Bytes2Hex(response.data_proof[i]))
+	}
+        fmt.Printf("\nMerkle proof for sigs: \n")
+        for i := 0; i < len(response.sig_proof); i++ {
+                fmt.Println(Bytes2Hex(response.data_proof[i]))
+        }
+
+
+	valid := PoC_verify(response, stage.data_root, stage.sig_root) 
+
+	fmt.Printf("\nProofs valid: \n")
+	fmt.Println(valid)
+
+	/* This is reporting for pretty much everything from the stage_PoC func
 	//Read data
 	data := read_data("helloworld.txt")
 	//fmt.Printf("Raw data:\n")
 	//fmt.Println(data)
 
-	//this is the largest chunk size that can be signed by secp256k1.Sign 
-	//bigger data chunks would have to be hashed before signed, which opens 
-	//the attack vector of sharing the hashes rather than the file, to collude
-	// to produce a proof-of-custody
 	chunk_size := 32
 
 	//Pad it so it's a multiple of the chunk_size
@@ -262,12 +350,7 @@ func main() {
 	}
 
 	fmt.Printf("\nProof is valid: \n")
-	fmt.Println(check_merkle_proof(proof, *file_root))
-
-	//A private key
-	key := Sha3(Hex2Bytes("hello world"))
-	//fmt.Printf("Private key: \n")
-	//fmt.Println(Bytes2Hex(key))
+	fmt.Println(verify_merkle_proof(proof, *file_root))
 
 	//Signatures of the data chunks
 	sigs := sign_chunks(chunks, key)
@@ -280,5 +363,5 @@ func main() {
 	sig_root := merkle_tree(sig_orphans)
 	fmt.Printf("\n Merkle root of sigs: \n")
 	fmt.Println(Bytes2Hex((*sig_root).value))
-	
+	*/	
 }
