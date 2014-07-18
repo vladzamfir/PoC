@@ -9,8 +9,6 @@ import (
     	"io/ioutil"
 )
 
-const file = "helloworld.txt"
-
 func check(e error) {
     if e != nil {
         panic(e)
@@ -75,7 +73,8 @@ func make_orphan_nodes (data_chunks [][]byte) []*Node {
 	return orphans
 }
 
-/* this makes a modified merkle tree, one that doesn't require an exact power of 2 number of leaves
+
+/* The following function makes a modified merkle tree, one that doesn't require an exact power of 2 number of leaves
   for example, a merkle tree with 3 leaves would look like this:
        O
       / \
@@ -86,8 +85,6 @@ func make_orphan_nodes (data_chunks [][]byte) []*Node {
 The convention will be to append to bigger hash to a smaller hash
 	H(H1 + H2) if H1 < H2 
 */
-
-
 func merkle_tree(orphans_copy []*Node) *Node {
         num_orphans := len(orphans_copy)
 	
@@ -220,7 +217,7 @@ type PoC_stage struct {
 	sig_root *Node
 }
 
-
+//This fills the above struct - it sets up everything that is needed to produce Merkle proofs
 func stage_PoC(file string, key []byte) PoC_stage {
         //this is the largest chunk size that can be signed by secp256k1.Sign
         //bigger data chunks would have to be hashed before signed, which opens
