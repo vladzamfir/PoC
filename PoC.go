@@ -2,6 +2,7 @@ package main
 
 import (
         "fmt"
+	"math/big"
 	"bytes"
         "encoding/hex"
         "github.com/obscuren/sha3"
@@ -170,7 +171,6 @@ func sign_chunks(data_chunks [][]byte, key []byte) [][]byte {
 	
 }
 
-//These next couple of function are very specialized for binary trees 
 func find_sibling (brother *Node) *Node{
 	parent := (*brother).parent[0]
 	if (*parent).child[0] == brother {
@@ -181,9 +181,22 @@ func find_sibling (brother *Node) *Node{
 }
 
 
-func produce_merkle_proof(leaves []*Node, challenge int) [][]byte {
+func produce_merkle_proof(root *Node, smaller []bool) [][]byte {
+	//First, we make our way from the root to the leaf
+	//the boolean array tells us how to decend down the tree
+	//specifically, it says whether to go for to the child with a smaller hash-value
+	current_node := root	
+	for i := 0; len((*current_node).child) > 0; i++ {
+		kids := (*current_node).child
+		if (bytes.Compare(kids[0].value, kids[1].value) == -1) == smaller[i] {
+			current_node = kids[0]
+		} else {
+			current_node = kids[1]
+		}
+	}
+
+        //after you get to the leaf, do this
 	proof := new([][]byte)
-	current_node := leaves[challenge]
 	*proof = append(*proof, (*current_node).value)
 	for len((*current_node).parent) > 0 {
 		H := (*find_sibling(current_node)).value
@@ -194,11 +207,15 @@ func produce_merkle_proof(leaves []*Node, challenge int) [][]byte {
 }
 
 
-func verify_merkle_proof(proof [][]byte, root Node) bool {
+func verify_merkle_proof(proof [][]byte, root Node, smaller []bool) bool {
 	var H []byte
 	H = append(H, proof[0]...)
 	
 	for i := 1; i < len(proof); i++ {
+		if (bytes.Compare(H,proof[i]) == -1) != smaller[len(proof) - i - 1] {
+			return false
+		}
+
 		if bytes.Compare(H, proof[i]) == -1 {
 			H = append(H, proof[i]...)
 		} else { 
@@ -236,24 +253,59 @@ func stage_PoC(file string, key []byte) PoC_stage {
         sigs := sign_chunks(chunks, key)
         stage.sigs = make_orphan_nodes(sigs)
         stage.sig_root = merkle_tree(stage.sigs)
-
 	return stage
-}
-
-type PoC struct {
-        data_proof [][]byte
-        sig_proof [][]byte
 }
 
 func PoC_commit (stage PoC_stage) *Node {
 	return stage.sig_root
 }
 
+//the challenge is made of N sub-challenges	
+type PoC_challenge struct {
+	smaller [][]bool 
+}
 
-func PoC_response (stage PoC_stage, challenge int) PoC {
+//fills the above struct with random bools, namely num_challenges slices of size tree_depth
+//the tree depth, really, is the maximum tree depth - some proofs will be shorter, and that's fine
+func produce_challenge(seed []byte, num_challenges int, tree_depth int) PoC_challenge {
+	var chal PoC_challenge
+
+	Z := new(big.Int)
+	X := new(big.Int)
+	buff := new(big.Int)
+	buff.SetInt64(1024)
+	X.SetBytes(Sha3(seed))	
+	for i := 0; i < num_challenges; i++ {
+                chal.smaller = append(chal.smaller, *new([]bool))
+		for j := 0; j < tree_depth; j++ {
+			if X.Cmp(buff) == -1 {
+				X.SetBytes(Sha3(X.Bytes()))
+			} 
+			Y := int((Z.Mod(X,big.NewInt(2))).Int64())
+			X.Div(X,big.NewInt(2))
+			b := (Y == 1)
+			chal.smaller[i] = append(chal.smaller[i], b)
+		}
+	}
+	return chal
+}
+
+// Each [][]byte array is a merkle proof
+type PoC struct {
+        data_proof [][][]byte
+        sig_proof [][][]byte
+}
+
+// This produces a PoC from a stage in reponse to a challenge
+func PoC_response (stage PoC_stage, challenge PoC_challenge) PoC {
 	var proof PoC
-	proof.data_proof = produce_merkle_proof(stage.data, challenge)
-	proof.sig_proof = produce_merkle_proof(stage.sigs, challenge)
+	for i := 0; i < len(challenge.smaller); i++ {
+		proof.data_proof = append(proof.data_proof, *new([][]byte))
+		proof.sig_proof = append(proof.sig_proof, *new([][]byte))
+		
+		proof.data_proof[i] = produce_merkle_proof(stage.data_root, challenge.smaller[i])
+		proof.sig_proof[i] = produce_merkle_proof(stage.sig_root, challenge.smaller[i])
+	}
 	return proof
 }
 
@@ -266,14 +318,16 @@ func ECVerify(hash []byte, sig []byte) bool {
 	return true
 }
 
-func PoC_verify(proof PoC, file_root *Node, sig_root *Node) bool {
+//This verifies a PoC from the file + sig root and challenge
+func PoC_verify(proof PoC, file_root *Node, sig_root *Node, challenge PoC_challenge) bool {
 	var valid bool = true
-	valid = valid && verify_merkle_proof(proof.data_proof, *file_root)
-	valid = valid && verify_merkle_proof(proof.sig_proof, *sig_root)
-	if ECVerify(proof.data_proof[0], proof.sig_proof[0]) {
-		return valid
+	for i := 0; i < len(challenge.smaller); i++ {
+		valid = valid && verify_merkle_proof(proof.data_proof[i], *file_root, challenge.smaller[i])
+		valid = valid && verify_merkle_proof(proof.sig_proof[i], *sig_root, challenge.smaller[i])
+		valid = valid && ECVerify(proof.data_proof[i][0], proof.sig_proof[i][0])
+		if !valid {return false}
 	}
-	return false
+	return true
 }
 
 func main() {
@@ -289,76 +343,17 @@ func main() {
 	fmt.Printf("\nCommitment of signature root: \n")
 	fmt.Println(Bytes2Hex((*commit).value))
 
-	challenge := 0
-	fmt.Printf("\nChallenge: \n%d\n", challenge)
+	challenge := produce_challenge(Hex2Bytes("hello world"), 5, 7)
+
+	fmt.Printf("\nChallenge: \n")
+	fmt.Println(challenge)
 
 	response := PoC_response(stage, challenge)	
-	fmt.Printf("\nMerkle proof for data: \n")
-	for i := 0; i < len(response.data_proof); i++ {
-		fmt.Println(Bytes2Hex(response.data_proof[i]))
-	}
-        fmt.Printf("\nMerkle proof for sigs: \n")
-        for i := 0; i < len(response.sig_proof); i++ {
-                fmt.Println(Bytes2Hex(response.data_proof[i]))
-        }
 
-
-	valid := PoC_verify(response, stage.data_root, stage.sig_root) 
+	valid := PoC_verify(response, stage.data_root, stage.sig_root, challenge) 
 
 	fmt.Printf("\nProofs valid: \n")
 	fmt.Println(valid)
 
-	/* This is reporting for pretty much everything from the stage_PoC func
-	//Read data
-	data := read_data("helloworld.txt")
-	//fmt.Printf("Raw data:\n")
-	//fmt.Println(data)
 
-	chunk_size := 32
-
-	//Pad it so it's a multiple of the chunk_size
-	padded := pad_data(data, chunk_size)
-	//fmt.Printf("Padded data: \n")
-	//fmt.Println(padded)
-
-	//Slice the (padded) data into chunks
-	chunks := slice_data(padded, chunk_size)
-	//fmt.Printf("Sliced data, \n")
-	//fmt.Println(chunks)
-
-	fmt.Printf("Note that we have %d data chunks/signatures as the leaves of the merkle trees\n\n", len(chunks))
-
-	orphans := make_orphan_nodes(chunks)
-
-	//Calculate the merkle root of the file
-	file_root := merkle_tree(orphans)
-	fmt.Printf("Merkle root of file: \n")
-	fmt.Println(Bytes2Hex((*file_root).value))
-
-	//This can be used to check the structure of the tree
-	//var calls int = 0
-	//report_decendants(file_root, &calls)
-
-	challenge := 0
-	proof := produce_merkle_proof(orphans, challenge)
-	fmt.Printf("\nMerkle proof of leaf %d: \n", challenge) 
-	for i := 0; i < len(proof); i++ {
-		fmt.Println(Bytes2Hex(proof[i]))
-	}
-
-	fmt.Printf("\nProof is valid: \n")
-	fmt.Println(verify_merkle_proof(proof, *file_root))
-
-	//Signatures of the data chunks
-	sigs := sign_chunks(chunks, key)
-	//fmt.Printf("Signatures: \n")
-	//fmt.Println(sigs)
-
-	sig_orphans := make_orphan_nodes(sigs)
-	
-	//Calculate merkle root of the signature
-	sig_root := merkle_tree(sig_orphans)
-	fmt.Printf("\n Merkle root of sigs: \n")
-	fmt.Println(Bytes2Hex((*sig_root).value))
-	*/	
 }
