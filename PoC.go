@@ -61,6 +61,7 @@ type Node struct {
 	value []byte
 	child []*Node
 	parent []*Node
+	sig *Node	
 }
 
 //This makes unconnected nodes with .value fields as the slices of the data
@@ -83,7 +84,7 @@ func make_orphan_nodes (data_chunks [][]byte) []*Node {
     / \
 
 
-The convention will be to append to bigger hash to a smaller hash
+The convention will be to append to bigger hash to a directions hash
 	H(H1 + H2) if H1 < H2 
 */
 func merkle_tree(orphans_copy []*Node) *Node {
@@ -180,22 +181,24 @@ func find_sibling (brother *Node) *Node{
 	}
 }
 
-
-func produce_merkle_proof(root *Node, smaller []bool) [][]byte {
-	//First, we make our way from the root to the leaf
-	//the boolean array tells us how to decend down the tree
-	//specifically, it says whether to go for to the child with a smaller hash-value
-	current_node := root	
-	for i := 0; len((*current_node).child) > 0; i++ {
-		kids := (*current_node).child
-		if (bytes.Compare(kids[0].value, kids[1].value) == -1) == smaller[i] {
-			current_node = kids[0]
-		} else {
-			current_node = kids[1]
+//returns a merkle proof of a leaf at a returned pointer
+func produce_merkle_proof(starting_point *Node, using_directions bool, directions []bool) ([][]byte, *Node) {
+	current_node := starting_point
+	if using_directions {  //directions are from the root node
+		//First, we make our way from the root to the leaf
+		//the boolean array tells us how to decend down the tree
+		//specifically, it says whether to go for to the child with a directions hash-value
+		for i := 0; len((*current_node).child) > 0; i++ {
+			kids := (*current_node).child
+			if (bytes.Compare(kids[0].value, kids[1].value) == -1) == directions[i] {
+				current_node = kids[0]
+			} else {
+				current_node = kids[1]
+			}
 		}
-	}
-
-        //after you get to the leaf, do this
+	} 
+	leaf := *current_node
+        //produce a merkle proof, from the leaf of the tree:
 	proof := new([][]byte)
 	*proof = append(*proof, (*current_node).value)
 	for len((*current_node).parent) > 0 {
@@ -203,17 +206,21 @@ func produce_merkle_proof(root *Node, smaller []bool) [][]byte {
 		*proof = append(*proof, H)		
 		current_node = (*current_node).parent[0]
 	}
-	return *proof
+	return *proof, &leaf
 }
 
 
-func verify_merkle_proof(proof [][]byte, root Node, smaller []bool) bool {
+
+//sometimes the merkle proof will mandate an order, other times it will not
+func verify_merkle_proof(proof [][]byte, root Node, check_order bool, directions []bool) bool {
 	var H []byte
 	H = append(H, proof[0]...)
 	
 	for i := 1; i < len(proof); i++ {
-		if (bytes.Compare(H,proof[i]) == -1) != smaller[len(proof) - i - 1] {
-			return false
+		if check_order {
+			if (bytes.Compare(H,proof[i]) == -1) != directions[len(proof) - i - 1] {
+				return false
+			}
 		}
 
 		if bytes.Compare(H, proof[i]) == -1 {
@@ -253,6 +260,11 @@ func stage_PoC(file string, key []byte) PoC_stage {
         sigs := sign_chunks(chunks, key)
         stage.sigs = make_orphan_nodes(sigs)
         stage.sig_root = merkle_tree(stage.sigs)
+	
+	for i := 0; i < len(stage.data); i ++ {
+		(*stage.data[i]).sig = stage.sigs[i]
+	}
+
 	return stage
 }
 
@@ -262,7 +274,7 @@ func PoC_commit (stage PoC_stage) *Node {
 
 //the challenge is made of N sub-challenges	
 type PoC_challenge struct {
-	smaller [][]bool 
+	directions [][]bool 
 }
 
 //fills the above struct with random bools, namely num_challenges slices of size tree_depth
@@ -276,7 +288,7 @@ func produce_challenge(seed []byte, num_challenges int, tree_depth int) PoC_chal
 	buff.SetInt64(1024)
 	X.SetBytes(Sha3(seed))	
 	for i := 0; i < num_challenges; i++ {
-                chal.smaller = append(chal.smaller, *new([]bool))
+                chal.directions = append(chal.directions, *new([]bool))
 		for j := 0; j < tree_depth; j++ {
 			if X.Cmp(buff) == -1 {
 				X.SetBytes(Sha3(X.Bytes()))
@@ -284,7 +296,7 @@ func produce_challenge(seed []byte, num_challenges int, tree_depth int) PoC_chal
 			Y := int((Z.Mod(X,big.NewInt(2))).Int64())
 			X.Div(X,big.NewInt(2))
 			b := (Y == 1)
-			chal.smaller[i] = append(chal.smaller[i], b)
+			chal.directions[i] = append(chal.directions[i], b)
 		}
 	}
 	return chal
@@ -299,12 +311,13 @@ type PoC struct {
 // This produces a PoC from a stage in reponse to a challenge
 func PoC_response (stage PoC_stage, challenge PoC_challenge) PoC {
 	var proof PoC
-	for i := 0; i < len(challenge.smaller); i++ {
+	data_leaf := new(Node)
+	for i := 0; i < len(challenge.directions); i++ {
 		proof.data_proof = append(proof.data_proof, *new([][]byte))
 		proof.sig_proof = append(proof.sig_proof, *new([][]byte))
 		
-		proof.data_proof[i] = produce_merkle_proof(stage.data_root, challenge.smaller[i])
-		proof.sig_proof[i] = produce_merkle_proof(stage.sig_root, challenge.smaller[i])
+		proof.data_proof[i], data_leaf = produce_merkle_proof(stage.data_root, true, challenge.directions[i])
+		proof.sig_proof[i], _ = produce_merkle_proof((*data_leaf).sig, false, challenge.directions[i])
 	}
 	return proof
 }
@@ -321,9 +334,9 @@ func ECVerify(hash []byte, sig []byte) bool {
 //This verifies a PoC from the file + sig root and challenge
 func PoC_verify(proof PoC, file_root *Node, sig_root *Node, challenge PoC_challenge) bool {
 	var valid bool = true
-	for i := 0; i < len(challenge.smaller); i++ {
-		valid = valid && verify_merkle_proof(proof.data_proof[i], *file_root, challenge.smaller[i])
-		valid = valid && verify_merkle_proof(proof.sig_proof[i], *sig_root, challenge.smaller[i])
+	for i := 0; i < len(challenge.directions); i++ {
+		valid = valid && verify_merkle_proof(proof.data_proof[i], *file_root, true, challenge.directions[i])
+		valid = valid && verify_merkle_proof(proof.sig_proof[i], *sig_root, false,  challenge.directions[i])
 		valid = valid && ECVerify(proof.data_proof[i][0], proof.sig_proof[i][0])
 		if !valid {return false}
 	}
