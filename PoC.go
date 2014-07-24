@@ -123,7 +123,7 @@ func merkle_tree(leaves []*Node) *Node {
 			H := H1 //this'll hold the thing to be hashed
 
 
-			if bytes.Compare(H1, H2) == -1 {
+			if bytes.Compare(H1[0:32], H2[0:32]) == -1 {
 				H = append(H, H2...)
 			} else {
 				H = append(H2, H...)
@@ -219,7 +219,7 @@ func produce_merkle_proof(starting_point *Node, using_directions bool, direction
 			
 			//Decending the tree in the appropriate direction..
 			kids := (*current_node).child
-			if (bytes.Compare(kids[0].value, kids[1].value) == -1) == directions[i] {
+			if (bytes.Compare(kids[0].value[0:32], kids[1].value[0:32]) == -1) == directions[i] {
 				current_node = kids[0]
 			} else {
 				current_node = kids[1]
@@ -262,7 +262,7 @@ func verify_merkle_proof(proof [][]byte, root Node, check_directions bool, direc
 		}
 
 		// Regardless of the directions, the larger value gets concatenated with the smaller value
-		if bytes.Compare(H, proof[i]) == -1 {
+		if bytes.Compare(H[0:32], proof[i][0:32]) == -1 {
 			H = append(H, proof[i]...)
 		} else { 
 			H = append(proof[i], H...)
