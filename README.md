@@ -8,6 +8,7 @@ There are still edge-case security mitigations that need to be added.
 Check out the in-code comments for more details
 
 
+
 Don't mind my awful naming conventions, but:
 
 `merkle_tree` makes a modified merkle tree, one that doesn't require an exact power of 2 number of leaves.
