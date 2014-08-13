@@ -1,10 +1,11 @@
-PoC
+Proof of Custody library
 ===
 
-Basic proof-of-custody library
 Everything seems to work, but it hasn't been really tested in practice. 
+
 There are still edge-case security mitigations that need to be added.
-Check out the comments for more details
+
+Check out the in-code comments for more details
 
 
 Don't mind my awful naming conventions, but:
